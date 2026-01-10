@@ -9,7 +9,14 @@ import torch
 from comfy import model_detection, model_management
 from comfy.model_patcher import ModelPatcher
 
-from nunchaku.models.transformers.utils import patch_scale_key
+# Compatibility: patch_scale_key was removed from nunchaku package
+try:
+    from nunchaku.models.transformers.utils import patch_scale_key
+    _HAS_PATCH_SCALE_KEY = True
+except ImportError:
+    _HAS_PATCH_SCALE_KEY = False
+    patch_scale_key = None
+
 from nunchaku.utils import check_hardware_compatibility, get_precision_from_quantization_config
 
 from ...model_configs.zimage import NunchakuZImage
@@ -150,7 +157,9 @@ def _load(sd: dict[str, torch.Tensor], metadata: dict[str, str] = {}):
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
     model = model_config.get_model(patched_sd, "")
 
-    patch_scale_key(model.diffusion_model, patched_sd)
+    # Compatibility: patch_scale_key was removed from nunchaku in newer versions
+    if _HAS_PATCH_SCALE_KEY and patch_scale_key is not None:
+        patch_scale_key(model.diffusion_model, patched_sd)
 
     model.load_model_weights(patched_sd, "")
     return ModelPatcher(model, load_device=load_device, offload_device=offload_device)
