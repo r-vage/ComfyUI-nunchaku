@@ -3,12 +3,13 @@ This module provides the :class:`NunchakuZImageDiTLoader` class for loading Nunc
 """
 
 import json
+import logging
 
 import comfy.utils
 import torch
 from comfy import model_detection, model_management
-from comfy.model_patcher import ModelPatcher
 
+from nunchaku.models.transformers.utils import convert_fp16
 # Compatibility: patch_scale_key was removed from nunchaku package
 try:
     from nunchaku.models.transformers.utils import patch_scale_key
@@ -17,9 +18,10 @@ except ImportError:
     _HAS_PATCH_SCALE_KEY = False
     patch_scale_key = None
 
-from nunchaku.utils import check_hardware_compatibility, get_precision_from_quantization_config
+from nunchaku.utils import check_hardware_compatibility, get_precision_from_quantization_config, is_turing
 
 from ...model_configs.zimage import NunchakuZImage
+from ...model_patcher.zimage import ZImageModelPatcher
 from ..utils import get_filename_list, get_full_path_or_raise
 
 
@@ -131,9 +133,6 @@ def _load(sd: dict[str, torch.Tensor], metadata: dict[str, str] = {}):
     if len(temp_sd) > 0:
         sd = temp_sd
 
-    parameters = comfy.utils.calculate_parameters(sd)
-    weight_dtype = comfy.utils.weight_dtype(sd)
-
     load_device = model_management.get_torch_device()
     offload_device = model_management.unet_offload_device()
     check_hardware_compatibility(quantization_config, load_device)
@@ -142,27 +141,28 @@ def _load(sd: dict[str, torch.Tensor], metadata: dict[str, str] = {}):
 
     model_config = NunchakuZImage(rank=rank, precision=precision, skip_refiners=skip_refiners)
 
-    unet_weight_dtype = list(model_config.supported_inference_dtypes)
-
-    unet_dtype = model_management.unet_dtype(
-        model_params=parameters, supported_dtypes=unet_weight_dtype, weight_dtype=weight_dtype
-    )
-
-    manual_cast_dtype = model_management.unet_manual_cast(
-        unet_dtype, load_device, model_config.supported_inference_dtypes
-    )
+    if not is_turing():
+        unet_dtype = torch.bfloat16
+        manual_cast_dtype = None
+        torch_dtype = torch.bfloat16
+    else:
+        unet_dtype = torch.bfloat16
+        manual_cast_dtype = torch.float16
+        torch_dtype = torch.float16
+    logging.info(f"unet_dtype: {unet_dtype}, manual_cast_dtype: {manual_cast_dtype}, svdq_linear_dtype: {torch_dtype}")
+    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
 
     patched_sd = _patch_state_dict(new_sd)
-
-    model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
-    model = model_config.get_model(patched_sd, "")
+    model = model_config.get_model(patched_sd, "", torch_dtype=torch_dtype)
 
     # Compatibility: patch_scale_key was removed from nunchaku in newer versions
     if _HAS_PATCH_SCALE_KEY and patch_scale_key is not None:
         patch_scale_key(model.diffusion_model, patched_sd)
+    if torch_dtype == torch.float16:
+        convert_fp16(model.diffusion_model, patched_sd)
 
     model.load_model_weights(patched_sd, "")
-    return ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    return ZImageModelPatcher(model, load_device=load_device, offload_device=offload_device)
 
 
 class NunchakuZImageDiTLoader:
